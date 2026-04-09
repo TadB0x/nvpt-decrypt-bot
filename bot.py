@@ -36,7 +36,11 @@ KEYS = [
     b"napsternetv",
     b"npv2",
     b"npv4",
-    b"1234567890123456" 
+    b"1234567890123456",
+    b"v2ray",
+    b"xray",
+    b"core",
+    b"proxy"
 ]
 
 async def decrypt_nvpt_file(file_path: str):
@@ -44,27 +48,29 @@ async def decrypt_nvpt_file(file_path: str):
         with open(file_path, 'rb') as f:
             encrypted_data = f.read()
 
+        # Some files are raw bytes, some are Base64
         try:
             raw_data = base64.b64decode(encrypted_data)
         except Exception:
             raw_data = encrypted_data
 
         for key in KEYS:
-            try:
-                decrypted = xxtea.decrypt(raw_data, key)
-                if decrypted:
-                    decoded = decrypted.decode('utf-8', errors='ignore')
-                    # Heuristic: Configs usually look like JSON or have specific headers
-                    # "v": version, "ps": remarks, "add": address, "port": port
-                    if any(x in decoded for x in ['{', '"v":', '"ps":', '"add":', '"port":']):
-                        decrypted_path = file_path + ".decrypted.json"
-                        with open(decrypted_path, 'w') as df:
-                            df.write(decoded)
-                        return decrypted_path
-            except Exception:
-                continue
+            # Try both with and without padding to be safe
+            for padding in [True, False]:
+                try:
+                    decrypted = xxtea.decrypt(raw_data, key, padding=padding)
+                    if decrypted:
+                        decoded = decrypted.decode('utf-8', errors='ignore')
+                        # Refined heuristic: check for JSON or common VPN keywords
+                        if "{" in decoded and any(x in decoded for x in ['"v":', '"ps":', '"add":', '"port":', '"outbounds":']):
+                            decrypted_path = file_path + ".decrypted.json"
+                            with open(decrypted_path, 'w') as df:
+                                df.write(decoded)
+                            return decrypted_path
+                except Exception:
+                    continue
         
-        # Fallback: check if it's already plain text JSON
+        # Last resort fallback: check if raw data (B64 decoded) is already plain text
         try:
             decoded = raw_data.decode('utf-8', errors='ignore')
             if "{" in decoded and '"ps":' in decoded:
@@ -132,7 +138,6 @@ async def process_decrypt(callback_query: CallbackQuery):
         await status_msg.edit_text(f"❌ An error occurred during processing.")
     
     finally:
-        # ABSOLUTE CLEANUP: Ensure both files are removed no matter what
         try:
             if os.path.exists(local_file_path):
                 os.remove(local_file_path)
