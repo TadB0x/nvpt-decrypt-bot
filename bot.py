@@ -54,18 +54,21 @@ async def decrypt_nvpt_file(file_path: str):
                 decrypted = xxtea.decrypt(raw_data, key)
                 if decrypted:
                     decoded = decrypted.decode('utf-8', errors='ignore')
-                    if any(x in decoded for x in ['{', '"v":', '"ps":', '"add":']):
-                        decrypted_path = file_path + ".decrypted.txt"
+                    # Heuristic: Configs usually look like JSON or have specific headers
+                    # "v": version, "ps": remarks, "add": address, "port": port
+                    if any(x in decoded for x in ['{', '"v":', '"ps":', '"add":', '"port":']):
+                        decrypted_path = file_path + ".decrypted.json"
                         with open(decrypted_path, 'w') as df:
                             df.write(decoded)
                         return decrypted_path
             except Exception:
                 continue
         
+        # Fallback: check if it's already plain text JSON
         try:
             decoded = raw_data.decode('utf-8', errors='ignore')
-            if "{" in decoded:
-                decrypted_path = file_path + ".decrypted.txt"
+            if "{" in decoded and '"ps":' in decoded:
+                decrypted_path = file_path + ".decrypted.json"
                 with open(decrypted_path, 'w') as df:
                     df.write(decoded)
                 return decrypted_path
@@ -82,9 +85,7 @@ async def handle_document(message: types.Message):
     document = message.document
     file_name = document.file_name.lower() if document.file_name else ""
     
-    # Check for .nvpt or .npvt extension
     if file_name.endswith(".nvpt") or file_name.endswith(".npvt"):
-        # Create a short hash of the file_id to keep callback data small
         short_id = hashlib.md5(document.file_id.encode()).hexdigest()[:10]
         file_cache[short_id] = document.file_id
         
@@ -92,14 +93,11 @@ async def handle_document(message: types.Message):
             [InlineKeyboardButton(text="Decrypt 🔓", callback_data=f"dec:{short_id}")]
         ])
         
-        try:
-            await message.reply(
-                f"📄 **File Detected:** `{file_name}`\nPress the button below to decrypt.",
-                reply_markup=keyboard,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.error(f"Failed to send reply: {e}")
+        await message.reply(
+            f"📄 **File Detected:** `{file_name}`\nClick the button to decrypt.",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
 
 @dp.callback_query(F.data.startswith("dec:"))
 async def process_decrypt(callback_query: CallbackQuery):
@@ -113,28 +111,35 @@ async def process_decrypt(callback_query: CallbackQuery):
     await callback_query.answer("Processing...")
     status_msg = await callback_query.message.edit_text("⏳ Decrypting... please wait.")
     
+    local_file_path = os.path.join(DOWNLOAD_PATH, f"{short_id}")
+    decrypted_file_path = None
+    
     try:
         file = await bot.get_file(file_id)
-        local_file_path = os.path.join(DOWNLOAD_PATH, f"{short_id}")
         await bot.download_file(file.file_path, destination=local_file_path)
         
-        decrypted_file = await decrypt_nvpt_file(local_file_path)
+        decrypted_file_path = await decrypt_nvpt_file(local_file_path)
         
-        if decrypted_file:
-            input_file = FSInputFile(decrypted_file, filename="decrypted_config.json")
+        if decrypted_file_path:
+            input_file = FSInputFile(decrypted_file_path, filename="decrypted_config.json")
             await callback_query.message.answer_document(input_file, caption="✅ Decryption successful!")
             await status_msg.delete()
-            
-            os.remove(local_file_path)
-            os.remove(decrypted_file)
         else:
-            await status_msg.edit_text("❌ Failed to decrypt. The file might be using a unique key or HWID lock.")
-            if os.path.exists(local_file_path):
-                os.remove(local_file_path)
+            await status_msg.edit_text("❌ Failed to decrypt. The file might use a unique key, HWID lock, or is not a standard VPN config.")
             
     except Exception as e:
         logger.exception("Error in process_decrypt")
-        await status_msg.edit_text(f"❌ Error during decryption.")
+        await status_msg.edit_text(f"❌ An error occurred during processing.")
+    
+    finally:
+        # ABSOLUTE CLEANUP: Ensure both files are removed no matter what
+        try:
+            if os.path.exists(local_file_path):
+                os.remove(local_file_path)
+            if decrypted_file_path and os.path.exists(decrypted_file_path):
+                os.remove(decrypted_file_path)
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
